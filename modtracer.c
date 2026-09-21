@@ -1,4 +1,5 @@
 #include <linux/init.h>
+#include <linux/iee_security.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -28,8 +29,6 @@ static int cmp_func(const void *a, const void *b) {
 static int gather_module_regions(void) {
     struct module *mod;
     struct module_region *new_regions;
-    int i = 0;
-
     list_for_each_entry(mod, THIS_MODULE->list.prev, list) {
         new_regions = krealloc(module_regions, (module_count + 1) * sizeof(*module_regions), GFP_KERNEL);
         if (!new_regions) {
@@ -82,21 +81,51 @@ static void modtracer_memory_gaps(void) {
     }
 }
 
+static unsigned long modtracer_iee_callback(enum iee_security_tool_id id,
+        enum iee_security_reason reason, unsigned long event, void *context)
+{
+    if (id != IEE_SECURITY_TOOL_MODTRACER ||
+        reason != IEE_SECURITY_REASON_CALLBACK)
+        return -EINVAL;
+
+    return event == 0 ? 0 : -EINVAL;
+}
+
 static int __init modtracer_init(void) {
+    int ret;
+
     pr_info("ModTracer Loaded...\n");
 
-    if (gather_module_regions() < 0) {
+    if (gather_module_regions() < 0)
         return -ENOMEM;
+
+    ret = iee_security_tool_register(IEE_SECURITY_TOOL_MODTRACER,
+                                     IEE_SECURITY_TOOL_CALLBACK, 0,
+                                     modtracer_iee_callback, THIS_MODULE);
+    if (ret) {
+        kfree(module_regions);
+        module_regions = NULL;
+        return ret;
     }
 
+    ret = iee_security_tool_invoke(IEE_SECURITY_TOOL_MODTRACER, 0, NULL);
+    if (ret) {
+        iee_security_tool_unregister(IEE_SECURITY_TOOL_MODTRACER,
+                                     modtracer_iee_callback);
+        kfree(module_regions);
+        module_regions = NULL;
+        return ret;
+    }
+
+    /* Scanning holes deliberately faults; do it after leaving the IEE root. */
     modtracer_memory_gaps();
-
-    pr_info("ModTracer completed!\n");
-
+    pr_info("ModTracer completed through IEE!\n");
     return 0;
 }
 
 static void __exit modtracer_exit(void) {
+    iee_security_tool_unregister(IEE_SECURITY_TOOL_MODTRACER,
+                                 modtracer_iee_callback);
     kfree(module_regions);
     pr_info("ModTracer Unloaded!\n");
 }
